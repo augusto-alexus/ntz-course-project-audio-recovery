@@ -2,3 +2,4 @@ audio/*
 backup/*
 compare/*
 tmp/*
+venv/*
