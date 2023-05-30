@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, send_file
+from flask import Flask, render_template, request, send_file, jsonify
 import tensorflow as tf
 import os
 
@@ -13,8 +13,7 @@ def upload():
         for file in request.files.getlist('file'):
              path = os.path.join(app.config['UPLOAD_DIR'], file.filename)
              file.save(path)
-             send_file(path, as_attachment=True)
-        return render_template("upload.html", msg = "Files uplaoded successfully.", link = f'{request.base_url}/download/{file.filename}')
+        return jsonify({"link": f'{request.base_url}/download/{file.filename}'})
 
     return render_template("upload.html", msg = "")
 
