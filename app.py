@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request
+from flask import Flask, render_template, request, send_file
 import tensorflow as tf
 import os
 
@@ -11,10 +11,17 @@ app.config["UPLOAD_DIR"] = "uploads"
 def upload():
     if request.method == 'POST':
         for file in request.files.getlist('file'):
-             file.save(os.path.join(app.config['UPLOAD_DIR'], file.filename))
-        return render_template("upload.html", msg = "Files uplaoded successfully.")
+             path = os.path.join(app.config['UPLOAD_DIR'], file.filename)
+             file.save(path)
+             send_file(path, as_attachment=True)
+        return render_template("upload.html", msg = "Files uplaoded successfully.", link = f'{request.base_url}/download/{file.filename}')
 
     return render_template("upload.html", msg = "")
+
+@app.route('/download/<path:filename>')
+def downloadFile (filename):
+    path = os.path.join(app.config['UPLOAD_DIR'], filename)
+    return send_file(path, as_attachment=True)
 
 if __name__ == "__main__":
     app.run()
