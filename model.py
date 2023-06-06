@@ -1,75 +1,56 @@
 import os
-import shutil
+import cv2
 import uuid
-import joblib
 import numpy as np
-import pandas as pd
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
 import tensorflow as tf
-from tensorflow import keras
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import MinMaxScaler
 import librosa
 import soundfile as sf
-
-# Set to some specific value if you want it to be used for every song, otherwise first loaded song will overwrite this with its value
-sample_rate = None 
+from tensorflow import keras
 
 sample_duration = 4
-
-cut_width = 22 # each second is ~44 width units in those spectograms (for n_fft=2048, hop_length=512)
-
-scaler = MinMaxScaler()
-scaler_fitted = False
-
+cut_width = 22
 n_fft = 2048
 hop_length = 512
 
-def load_dataset(max_files=1):
-    global sample_rate
-    """
-    Returns python list with [num_tracks] numpy array of shape (track_length, 1), track_length may be different for each song.
-    """
-    dataset = []
-    for i, file in enumerate(os.listdir('uploads')):
-        if i >= max_files:
-            break
-        data, sample_rate = librosa.load(f'./uploads/{file}', sr=sample_rate)
-        data = np.expand_dims(data, axis=-1)
-        dataset.append(data)
-    return dataset
 
-def sample_dataset(dataset):
-    assert sample_rate is not None
-    sampled_dataset = []
+def load_song(path):
+    sample_rate = None
+    data, sample_rate = librosa.load(path, sr=sample_rate)
+    data = np.expand_dims(data, axis=-1)
+    return data, sample_rate
+
+
+def sample_song(song, sample_rate):
+    sampled_song = []
     sample_length = int(sample_rate * sample_duration)
-    for track in dataset:
-        for i in range(0, track.shape[0], sample_length):
-            sampled_dataset.append(track[i:i+sample_length])
-        if sampled_dataset[-1].shape[0] != sample_length:
-            sampled_dataset.pop()
-    return sampled_dataset
+    for i in range(0, song.shape[0], sample_length):
+        sampled_song.append(song[i:i+sample_length])
+    if sampled_song[-1].shape[0] != sample_length:
+        sampled_song.pop()
+    return sampled_song
 
-def write_audio(filename, audio):
+
+def write_audio(filename, audio, sample_rate):
   sf.write(filename, audio, sample_rate, 'PCM_24')
 
-def scaler_transform(spectrograms):
-    global scaler_fitted
+
+def scaler_transform(scaler, spectrograms):
     num_samples, width, height, channels = spectrograms.shape
     spectrograms = np.reshape(spectrograms, (num_samples, width * height * channels))
-    if scaler_fitted: # type: ignore
-        spectrograms = scaler.transform(spectrograms)
-    else:
-        spectrograms = scaler.fit_transform(spectrograms)
-        scaler_fitted = True
+    spectrograms = scaler.fit_transform(spectrograms)
     spectrograms = np.reshape(spectrograms, (num_samples, width, height, channels)) # type: ignore
-    return spectrograms
+    return scaler, spectrograms
 
-def scaler_inverse_transform(spectrograms):
-    assert scaler_fitted is True
+
+def scaler_inverse_transform(scaler, spectrograms):
     num_samples, width, height, channels = spectrograms.shape
     spectrograms = np.reshape(spectrograms, (num_samples, width * height * channels))
     spectrograms = scaler.inverse_transform(spectrograms)
     spectrograms = np.reshape(spectrograms, (num_samples, width, height, channels)) # type: ignore
     return spectrograms
+
 
 def pad_audio(audio, pad):
     pad_for = pad - (audio.shape[0] % pad)
@@ -77,71 +58,120 @@ def pad_audio(audio, pad):
         return audio
     return np.expand_dims(np.pad(audio.reshape(-1), (0, pad_for), 'constant', constant_values=(0, 0)), axis=-1)
 
-def get_mel_spectogram(audio):
-    assert sample_rate is not None
+
+def get_mel_spectogram(audio, sample_rate):
     padded_audio = pad_audio(audio, pad=n_fft).reshape(-1)
     S = librosa.feature.melspectrogram(y=padded_audio, sr=sample_rate, hop_length=hop_length, n_fft=n_fft)
     S = np.expand_dims(S, axis=-1) # Add channel dimension
     return S
 
-def get_cut_range(S):
-    cut_y_start = S.shape[1] // 2 - cut_width // 2
-    cut_height = 128 # 128 is the max height (at least for n_fft=2048, hop_length=512)
-    return slice(0, cut_height), slice(cut_y_start, cut_y_start+cut_width)
 
-# For now cuts are always in the middle of spectogram with the same size
-def cut_spectogram(S):
-    S_cut = np.copy(S)
-    cut_range = get_cut_range(S)
-    cut_region = np.array(S_cut[cut_range])
-    S_cut[cut_range] = 0
-    return S_cut, cut_region
-
-def show_mel_spectogram(S):
-    assert sample_rate is not None
+def show_mel_spectogram(S, sample_rate, name):
+    try:
+        plt.clf()
+    except:
+        pass
     S_dB = librosa.power_to_db(S.reshape(S.shape[:-1]), ref=np.max)
     img = librosa.display.specshow(S_dB, x_axis='time', y_axis='mel', sr=sample_rate, fmax=8000)
     plt.colorbar(img, format='%+2.0f dB')
-    plt.title('Mel-frequency spectrogram')
+    plt.title(f'Mel-frequency spectrogram {name}')
+    plt.savefig(f"tmp/spectrogram-${uuid.uuid1()}.jpg")
 
-def reconstruct_raw_audio_from_mel_spectogram(S):
-    assert sample_rate is not None
+
+def restore_spectrogram(S_cut, S_pred):
+    def get_cut_range(S):
+        tmp = S.reshape(S.shape[:-1]).T
+        start, end = None, None
+
+        for i, s_col in enumerate(tmp[10:-10]):
+            if start == None:
+                if np.all(s_col < 0.05):
+                    start = i + 10
+            else:
+                if not np.all(s_col < 0.05):
+                    end = i + 10
+                    break
+
+        return slice(start, end)
+
+
+    def splice_spectrograms(S_cut, S_pred):
+        cut_range = get_cut_range(S_cut)
+        S = np.copy(S_cut)
+        S[:, cut_range] = S_pred[:, cut_range]
+        return S
+
+    tmp_S = splice_spectrograms(S_cut, S_pred)
+    cr0 = get_cut_range(S_cut)
+    cr = slice(cr0.start - 4, cr0.stop + 4)
+    roi = tmp_S[:, cr].copy()
+    blurred_roi = cv2.GaussianBlur(roi, (3, 1), 0)
+    blurred_roi = cv2.GaussianBlur(blurred_roi, (3, 1), 0)
+    blurred_roi = np.expand_dims(blurred_roi, axis=-1)
+    blurred_S = tmp_S.copy()
+    blurred_S[:, cr] = blurred_roi
+    return blurred_S, cr0
+
+
+def reconstruct_raw_audio_from_mel_spectogram(S, sample_rate):
     return np.expand_dims(librosa.feature.inverse.mel_to_audio(S.reshape(S.shape[:-1]), sr=sample_rate, n_fft=n_fft, hop_length=hop_length), axis=-1)
 
-def reconstruct_final_audio(predicted_S, cut_S, cut_raw_audio):
-    cut_range = get_cut_range(cut_S)
-    S = np.copy(cut_S)
-    S[cut_range] = predicted_S[cut_range]
-    # rec_raw_audio = reconstruct_raw_audio_from_mel_spectogram(S)
-    # rec = np.copy(cut_raw_audio)
-    # rec[cut_range] = rec_raw_audio[cut_range]
-    return S
 
-cnn_model = tf.keras.models.load_model('models/CNN-256-128-128-0')
+def get_cnn_model(input_shape):
+    input = keras.layers.Input(shape=input_shape)
 
-def run():
-    ds = load_dataset()
-    sample_ds = sample_dataset(ds)
-    spectrogram_ds = np.array([get_mel_spectogram(sample) for sample in sample_ds])
+    conv1 = keras.layers.Conv2D(32, (3, 3), activation='relu', padding='same')(input)
+    conv1 = keras.layers.Conv2D(64, (3, 3), activation='relu', padding='same')(conv1)
+    conv1 = keras.layers.Conv2D(128, (3, 3), activation='relu', padding='same')(conv1)
 
-    CS = [cut_spectogram(S) for S in spectrogram_ds]
-    X = np.array([S_cut for S_cut, _ in CS])
-    y = np.copy(spectrogram_ds)
+    conv2 = keras.layers.Conv2D(64, (3, 3), activation='relu', padding='same')(input)
+    conv2 = keras.layers.Conv2D(128, (3, 3), activation='relu', padding='same')(conv2)
+    conv2 = keras.layers.Conv2D(128, (3, 3), activation='relu', padding='same')(conv2)
 
-    y = scaler_transform(y)
-    X = scaler_transform(X)
+    add1 = keras.layers.Add()([conv1, conv2])
 
-    y_pred = cnn_model.predict(X)
+    conv3 = keras.layers.Conv2D(128, (3, 3), activation='relu', padding='same')(add1)
+    conv3 = keras.layers.Conv2D(64, (3, 3), activation='relu', padding='same')(conv3)
+    conv3 = keras.layers.Conv2D(32, (3, 3), activation='relu', padding='same')(conv3)
 
-    y = scaler_inverse_transform(y)
-    X = scaler_inverse_transform(X)
-    y_pred = scaler_inverse_transform(y_pred)
+    conv4 = keras.layers.Conv2D(64, (3, 3), activation='relu', padding='same')(add1)
+    conv4 = keras.layers.Conv2D(32, (3, 3), activation='relu', padding='same')(conv4)
 
-    og_audio = sample_ds[0]
-    cut_audio = reconstruct_raw_audio_from_mel_spectogram(y_pred[0])
+    conv5 = keras.layers.Conv2D(32, (3, 3), activation='relu', padding='same')(add1)
+    
+    conv6 = keras.layers.Conv2D(32, (3, 3), activation='relu', padding='same')(add1)
 
+    add2 = keras.layers.Add()([conv3, conv4, conv5])
+
+    conv7 = keras.layers.Conv2D(32, (3, 3), activation='relu', padding='same')(add2)
+
+    add3 = keras.layers.Add()([conv7, add2, conv6])
+
+    output = keras.layers.Conv2D(32, (3, 3), activation='relu', padding='same')(add3)
+    output = keras.layers.Conv2D(1, (3, 3), activation='relu', padding='same')(output)
+
+    return keras.Model(inputs=input, outputs=output)
+
+
+def SSIMLoss(y_true, y_pred):
+    return 1 - tf.reduce_mean(tf.image.ssim(y_true, y_pred, 1.0))
+
+
+random_state = 45100
+np.random.seed(random_state)
+cnn_model = keras.models.load_model('models/2', custom_objects={'SSIMLoss': SSIMLoss})
+
+
+def run(path):
+    scaler = MinMaxScaler()
+    song_og, sample_rate = load_song(path)
+    song_samples = sample_song(song_og, sample_rate)
+    spectrograms = np.array([get_mel_spectogram(sample, sample_rate) for sample in song_samples])
+    scaler, scaled_spectograms = scaler_transform(scaler, spectrograms)
+    y_pred = cnn_model.predict(scaled_spectograms)
+    y_pred = scaler_inverse_transform(scaler, y_pred)
+    restored_S, _ = restore_spectrogram(spectrograms[0], y_pred[0])
+    cut_audio = reconstruct_raw_audio_from_mel_spectogram(restored_S, sample_rate)
     filename = f'{uuid.uuid1()}.wav'
-    write_audio(f'tmp/{filename}', cut_audio)
-
+    write_audio(f'tmp/{filename}', cut_audio, sample_rate)
     return filename
-

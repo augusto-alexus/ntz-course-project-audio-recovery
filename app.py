@@ -10,8 +10,9 @@ def upload():
     if request.method == 'POST':
         file = request.files['file']
         path = os.path.join(app.config['UPLOAD_DIR'], file.filename)
+        print(path, file)
         file.save(path)
-        filename = run()
+        filename = run(path)
         return jsonify({"link": f'{request.base_url}/download/{filename}'})
 
     return render_template("upload.html", msg = "")

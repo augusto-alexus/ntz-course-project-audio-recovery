@@ -3,3 +3,6 @@ backup/*
 compare/*
 tmp/*
 venv/*
+fma_small
+fma_extra_small
+uploads/*
